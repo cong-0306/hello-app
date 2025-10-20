@@ -1,0 +1,80 @@
+name: CI build & push & update-manifests
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: hello-app
+  DOCKERHUB_NAMESPACE: cong-0306
+  # 태그는 짧은 SHA와 latest 두 가지를 푸시
+  TAG_SHA: ${{ github.sha }}
+  TAG_SHORT: ${{ github.sha }} # 필요 시 steps에서 short_sha로 치환
+  MANIFESTS_REPO: cong-0306/k8s-manifests
+  MANIFESTS_PATH: hello-app
+  MANIFESTS_BRANCH: main
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout app repo
+        uses: actions/checkout@v4
+
+      - name: Set short SHA
+        id: vars
+        run: echo "short_sha=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}   # cong-0306
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ env.DOCKERHUB_NAMESPACE }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.DOCKERHUB_NAMESPACE }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.short_sha }}
+          build-args: |
+            APP_VERSION=${{ steps.vars.outputs.short_sha }}
+
+  update-manifests:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout manifests repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MANIFESTS_REPO }}
+          token: ${{ secrets.MANIFESTS_REPO_TOKEN }}  # PAT 권장
+          ref: ${{ env.MANIFESTS_BRANCH }}
+
+      - name: Update Deployment image tag (sed)
+        working-directory: ${{ env.MANIFESTS_PATH }}
+        run: |
+          short_sha=${GITHUB_SHA::7}
+          image="${{ env.DOCKERHUB_NAMESPACE }}/${{ env.IMAGE_NAME }}"
+          # deployment.yaml 내 image 라인을 새로운 태그로 치환
+          sed -i -E "s#(${image}):[a-zA-Z0-9._-]+#\1:${short_sha}#g" deployment.yaml
+
+      - name: Commit & Push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git status
+          git add .
+          git commit -m "CI: update ${env.IMAGE_NAME} image tag to ${GITHUB_SHA::7}"
+          git push origin ${{ env.MANIFESTS_BRANCH }}
+
